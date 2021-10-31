@@ -9,7 +9,7 @@ const isDigit = b => b >= 0x30 && b <= 0x39;
 const isLcAlpha = b => b >= 0x61 && b <= 0x7a;
 const isUcAlpha = b => b >= 0x41 && b <= 0x5a;
 
-const encodeB2PathComponent = raw => {
+const encodeB2Path = raw => {
   const bytes = textEncoder.encode(raw);
   return [...bytes]
     .map(b => SAFE_BYTES.has(b) || isDigit(b) || isLcAlpha(b) || isUcAlpha(b) ? String.fromCharCode(b) : `%${b.toString(16)}`)
@@ -33,6 +33,78 @@ const fetchOkJson = (url, opts) => fetch(url, opts).then(res => {
   });
 });
 
+async function handleDownload({
+  accountId,
+  apiUrl,
+  authorizationToken,
+  body,
+  bucketId,
+  bucketName,
+  contentType,
+  downloadUrl,
+  key,
+  params,
+}) {
+  const sourceDownloadUrl = `${downloadUrl}/file/${encodeURIComponent(bucketName)}/${encodeB2Path(key)}`;
+  return fetch(sourceDownloadUrl, {
+    headers: {
+      Authorization: authorizationToken,
+    }
+  });
+}
+
+async function handleUpload({
+  accountId,
+  apiUrl,
+  authorizationToken,
+  body,
+  bucketId,
+  bucketName,
+  contentType,
+  key,
+  params,
+}) {
+  const sha1 = url.searchParams.get("sha1");
+
+  if (!sha1) {
+    return new Response("SHA-1 required", {
+      status: 400,
+    });
+  }
+
+  const {
+    authorizationToken: uploadAuthorizationToken,
+    uploadUrl,
+  } = await fetchOkJson(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
+    method: "POST",
+    headers: {
+      Authorization: authorizationToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      bucketId,
+    }),
+  });
+  console.debug("Registered upload:", {
+    uploadUrl,
+  });
+
+  const uploadResult = await fetchOkJson(uploadUrl, {
+    method: "POST",
+    body,
+    headers: {
+      Authorization: uploadAuthorizationToken,
+      "Content-Type": contentType,
+      "X-Bz-Content-Sha1": sha1,
+      "X-Bz-File-Name": encodeB2Path(key),
+    }
+  });
+
+  return new Response(JSON.stringify(uploadResult, null, 2), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 async function handleRequest(request) {
   const auth = request.headers.get("authorization");
   const contentType = request.headers.get("content-type") || "b2/x-auto";
@@ -42,13 +114,6 @@ async function handleRequest(request) {
     .filter(c => c)
     .map(c => decodeURIComponent(c.replaceAll("+", " ")));
   const key = keyParts.join("/");
-  const sha1 = url.searchParams.get("sha1");
-
-  if (!sha1) {
-    return new Response("SHA-1 required", {
-      status: 400,
-    });
-  }
 
   const body = await request.arrayBuffer();
   console.debug("Received request:", {
@@ -60,9 +125,10 @@ async function handleRequest(request) {
   });
 
   const {
-    accountId, 
-    apiUrl, 
+    accountId,
+    apiUrl,
     authorizationToken,
+    downloadUrl,
   } = await fetchOkJson("https://api.backblazeb2.com/b2api/v2/b2_authorize_account", {
     headers: {
       Authorization: auth,
@@ -94,35 +160,21 @@ async function handleRequest(request) {
     bucketId,
   });
 
-  const {
-    authorizationToken: uploadAuthorizationToken,
-    uploadUrl,
-  } = await fetchOkJson(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
-    method: "POST",
-    headers: {
-      Authorization: authorizationToken,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      bucketId,
-    }),
-  });
-  console.debug("Registered upload:", {
-    uploadUrl,
-  });
-
-  const uploadResult = await fetchOkJson(uploadUrl, {
-    method: "POST",
+  const ctx = {
+    accountId,
+    apiUrl,
+    authorizationToken,
     body,
-    headers: {
-      Authorization: uploadAuthorizationToken,
-      "Content-Type": contentType,
-      "X-Bz-Content-Sha1": sha1,
-      "X-Bz-File-Name": encodeB2PathComponent(key),
-    }
-  });
-
-  return new Response(JSON.stringify(uploadResult, null, 2), {
-    headers: { "Content-Type": "application/json" },
-  });
+    bucketId,
+    bucketName,
+    contentType,
+    downloadUrl,
+    key,
+    params: searchParams,
+  };
+  if (request.method === "POST") {
+    return await handleUpload(ctx);
+  } else {
+    return await handleDownload(ctx);
+  }
 }
